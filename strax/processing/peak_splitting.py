@@ -31,6 +31,14 @@ class PeakSplitter:
 
     def __call__(self, peaks, records, to_pe,
                  do_iterations=1, min_area=0, **kwargs):
+        """
+        :param peaks: Original peaks. Sum waveform must have been built
+        and properties must have been computed (if you use them).
+        :param records: Records from which peaks were built.
+        :param to_pe: ADC to PE conversion factor array (of n_channels).
+        :param do_iterations: maximum number of times peaks are recursively split.
+        :param min_area: Minimum area to do split. Smaller peaks are not split.
+        """
         if not len(records) or not len(peaks) or not do_iterations:
             return peaks
 
@@ -62,6 +70,7 @@ class PeakSplitter:
             orig_dt=records[0]['dt'],
             min_area=min_area,
             args_options=tuple(args_options),
+            # TODO should this be like this? Should it not be strax.peak_dtype() or not at all?
             result_dtype=peaks.dtype)
 
         if is_split.sum() != 0:
@@ -130,6 +139,8 @@ class PeakSplitter:
 
     @staticmethod
     def find_split_points(w, *args_options):
+        """This function is overwritten by LocalMinimumSplitter or LocalMinimumSplitter
+        bare PeakSplitter class is not implemented"""
         raise NotImplementedError
 
 
@@ -182,6 +193,8 @@ class LocalMinimumSplitter(PeakSplitter):
                 min_since_max_i = i
 
         if found_one:
+            # TODO
+            #  Implementation inconsistent with docstring
             yield len(w), 0.
         yield NO_MORE_SPLITS, 0.
 
