@@ -959,6 +959,10 @@ class Context:
                     if not isinstance(result, strax.Chunk):
                         raise ValueError(f"Got type {type(result)} rather than "
                                          f"a strax Chunk from the processor!")
+                    # Apply functions known to contexts if any.
+                    result.data = self._apply_function(result.data,
+                                                       run_id,
+                                                       targets)
                     result.data = strax.apply_selection(
                         result.data,
                         selection_str=selection_str,
