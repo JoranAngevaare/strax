@@ -25,6 +25,7 @@ def merge_peaks(peaks, start_merge_at, end_merge_at,
     # Do the merging. Could numbafy this to optimize, probably...
     buffer = np.zeros(max_buffer, dtype=np.float32)
     buffer_top = np.zeros(max_buffer, dtype=np.float32)
+    digitize_top = 'data_top' in peaks.dtype.names
 
     for new_i, new_p in enumerate(new_peaks):
 
@@ -51,15 +52,16 @@ def merge_peaks(peaks, start_merge_at, end_merge_at,
             ),
             len(buffer)
         )] = 0
-        buffer_top[:min(
-            int(
-                (
-                        last_peak['time']
-                        + (last_peak['length'] * old_peaks['dt'].max())
-                        - first_peak['time']) / common_dt
-            ),
-            len(buffer_top)
-        )] = 0
+        if digitize_top:
+            buffer_top[:min(
+                int(
+                    (
+                            last_peak['time']
+                            + (last_peak['length'] * old_peaks['dt'].max())
+                            - first_peak['time']) / common_dt
+                ),
+                len(buffer_top)
+            )] = 0
 
         for p in old_peaks:
             # Upsample the sum and top/bottom array waveforms into their buffers
@@ -68,8 +70,9 @@ def merge_peaks(peaks, start_merge_at, end_merge_at,
             i0 = (p['time'] - new_p['time']) // common_dt
             buffer[i0: i0 + n_after] = \
                 np.repeat(p['data'][:p['length']], upsample) / upsample
-            buffer_top[i0: i0 + n_after] = \
-                np.repeat(p['data_top'][:p['length']], upsample) / upsample
+            if digitize_top:
+                buffer_top[i0: i0 + n_after] = \
+                    np.repeat(p['data_top'][:p['length']], upsample) / upsample
 
             # Handle the other peak attributes
             new_p['area'] += p['area']
@@ -79,8 +82,10 @@ def merge_peaks(peaks, start_merge_at, end_merge_at,
 
         # Downsample the buffers into new_p['data'], new_p['data_top'],
         # and new_p['data_bot']
-        strax.store_downsampled_waveform(new_p, buffer, True, buffer_top)
-
+        if digitize_top:
+            strax.store_downsampled_waveform_w_top(new_p, buffer, buffer_top)
+        else:
+            strax.store_downsampled_waveform(new_p, buffer)
         new_p['n_saturated_channels'] = new_p['saturated_channel'].sum()
 
         # Use the tight coincidence of the peak with the highest amplitude
@@ -152,7 +157,6 @@ def _replace_merged(result, orig, merge, skip_windows):
 
     
 @export
-@numba.njit(cache=True, nogil=True)
 def add_lone_hits(peaks, lone_hits, to_pe, n_top_channels=0):
     """
     Function which adds information from lone hits to peaks if lone hit
@@ -164,6 +168,17 @@ def add_lone_hits(peaks, lone_hits, to_pe, n_top_channels=0):
     :param to_pe: Gain values to convert lone hit area into PE.
     :param n_top_channels: Number of top array channels.
     """
+    # Create a top buffer and fill those values, discard later when data_top
+    # is not a field in the peaks array
+    _top_buffer = np.zeros_like(peaks['data'])
+    _add_lone_hits(peaks, lone_hits, to_pe, n_top_channels, _top_buffer)
+
+    if n_top_channels > 0:
+        peaks['data_top'] = peaks['data_top'] + _top_buffer
+
+
+# @numba.njit(cache=True, nogil=True)
+def _add_lone_hits(peaks, lone_hits, to_pe, n_top_channels, _top_buffer):
     fully_contained_index = strax.fully_contained_in(lone_hits, peaks)
 
     for fc_i, lh_i in zip(fully_contained_index, lone_hits):
@@ -180,4 +195,8 @@ def add_lone_hits(peaks, lone_hits, to_pe, n_top_channels=0):
 
         if n_top_channels > 0:
             if lh_i['channel'] < n_top_channels:
-                p['data_top'][index] += lh_area
+                _top_buffer[fc_i][index] += lh_area
+                print(lh_area)
+                print(_top_buffer[fc_i][index])
+                if np.sum(_top_buffer) ==0:
+                    raise ValueError(np.sum(_top_buffer))

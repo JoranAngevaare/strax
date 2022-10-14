@@ -4,6 +4,7 @@ import numba
 import strax
 from strax import utils
 from strax.dtypes import peak_dtype, DIGITAL_SUM_WAVEFORM_CHANNEL
+
 export, __all__ = strax.exporter()
 
 
@@ -39,7 +40,7 @@ def find_peaks(hits, adc_to_pe,
     # Magic number comes from
     #   np.iinfo(p['dt'].dtype).max*np.shape(p['data'])[1] = 429496729400 ns
     # but numba does not like it
-    assert left_extension+max_duration+right_extension < 429496729400, (
+    assert left_extension + max_duration + right_extension < 429496729400, (
         "Too large max duration causes integer overflow")
 
     n_channels = len(buffer[0]['area_per_channel'])
@@ -123,20 +124,45 @@ def find_peaks(hits, adc_to_pe,
 
     yield offset
 
+# Note! store_downsampled_waveform and store_downsampled_waveform_w_top because
+# numba can't compile if 'data_top' is not a field in the peak-array!
+# So naive implementations like #565 don't work
 
 @export
-@numba.jit(nopython=True, nogil=True, cache=True)
-def store_downsampled_waveform(p, wv_buffer, store_in_data_top=False,
-                               wv_buffer_top=np.ones(1, dtype=np.float32)):
-    """Downsample the waveform in buffer and store it in p['data'] and
+@numba.jit(nopython=True, nogil=True, cache=False)
+def store_downsampled_waveform(p, wv_buffer):
+    """see store_downsampled_waveform_w_top. Only skip the data_top field"""
+    n_samples = len(p['data'])
+    downsample_factor = int(np.ceil(p['length'] / n_samples))
+    if downsample_factor > 1:
+        # Compute peak length after downsampling.
+        # Do not ceil: see docstring!
+        p['length'] = int(np.floor(p['length'] / downsample_factor))
+        p['data'][:p['length']] = \
+            wv_buffer[:p['length'] * downsample_factor] \
+                .reshape(-1, downsample_factor) \
+                .sum(axis=1)
+        p['dt'] *= downsample_factor
+    else:
+        p['data'][:p['length']] = wv_buffer[:p['length']]
+
+
+@export
+@numba.jit(nopython=True, nogil=True, cache=False)
+def store_downsampled_waveform_w_top(
+        p, wv_buffer,
+        wv_buffer_top,
+):
+    """
+    Downsample the waveform in buffer and store it in p['data'] and
     in p['data_top'] if indicated to do so.
 
     :param p: Row of a strax peak array, or compatible type.
     Note that p['dt'] is adjusted to match the downsampling.
     :param wv_buffer: numpy array containing sum waveform during the peak
     at the input peak's sampling resolution p['dt'].
-    :param store_in_data_top: Boolean which indicates whether to also store
-    into p['data_top']
+    :param wv_buffer_top: numpy array containing sum waveform of the top array
+    during the peak at the input peak's sampling resolution p['dt'].
 
     When downsampling results in a fractional number of samples, the peak is
     shortened rather than extended. This causes data loss, but it is
@@ -150,25 +176,24 @@ def store_downsampled_waveform(p, wv_buffer, store_in_data_top=False,
         # Compute peak length after downsampling.
         # Do not ceil: see docstring!
         p['length'] = int(np.floor(p['length'] / downsample_factor))
-        if store_in_data_top:
-            p['data_top'][:p['length']] = \
-                    wv_buffer_top[:p['length'] * downsample_factor] \
-                    .reshape(-1, downsample_factor) \
-                    .sum(axis=1)
+        p['data_top'][:p['length']] = \
+            wv_buffer_top[:p['length'] * downsample_factor] \
+                .reshape(-1, downsample_factor) \
+                .sum(axis=1)
         p['data'][:p['length']] = \
             wv_buffer[:p['length'] * downsample_factor] \
                 .reshape(-1, downsample_factor) \
                 .sum(axis=1)
         p['dt'] *= downsample_factor
     else:
-        if store_in_data_top:
-            p['data_top'][:p['length']] = wv_buffer_top[:p['length']]
+        p['data_top'][:p['length']] = wv_buffer_top[:p['length']]
         p['data'][:p['length']] = wv_buffer[:p['length']]
 
 
 @export
-@numba.jit(nopython=True, nogil=True, cache=True)
-def sum_waveform(peaks, hits, records, record_links, adc_to_pe, n_top_channels=0,
+@numba.jit(nopython=True, nogil=True, cache=False)
+def sum_waveform(peaks, hits, records, record_links, adc_to_pe,
+                 n_top_channels=0,
                  select_peaks_indices=None):
     """Compute sum waveforms for all peaks in peaks. Only builds summed
     waveform other regions in which hits were found. This is required
@@ -299,7 +324,7 @@ def sum_waveform(peaks, hits, records, record_links, adc_to_pe, n_top_channels=0
             p['area'] += area_pe
 
         if n_top_channels > 0:
-            store_downsampled_waveform(p, swv_buffer, True, twv_buffer)
+            store_downsampled_waveform_w_top(p, swv_buffer, wv_buffer_top=twv_buffer)
         else:
             store_downsampled_waveform(p, swv_buffer)
 
@@ -321,7 +346,7 @@ def _build_hit_waveform(hit, record, hit_waveform):
 
     # Get record properties:
     record_data = record['data'][r_start:r_end]
-    multiplier = 2**record['amplitude_bit_shift']
+    multiplier = 2 ** record['amplitude_bit_shift']
     bl_fpart = record['baseline'] % 1
     max_in_record = record_data.max() * multiplier
 
@@ -401,7 +426,7 @@ def find_hit_integration_bounds(
     last_hit_index = np.ones(n_channels, dtype=np.int32) * NO_EARLIER_HIT
 
     n_intervals = len(excluded_intervals)
-    FAR_AWAY = 9223372036_854775807   # np.iinfo(np.int64).max, April 2262
+    FAR_AWAY = 9223372036_854775807  # np.iinfo(np.int64).max, April 2262
     interval_i = 0
 
     for hit_i, h in enumerate(hits):
